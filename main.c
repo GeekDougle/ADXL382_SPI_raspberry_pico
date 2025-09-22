@@ -38,6 +38,11 @@
 
 */
 
+#define ADXL38X_FIFO_SIZE 318		   // Number of entries in the FIFO buffer. Not # of bytes.
+#define ADXL38X_DATA_SIZE_WITH_CH 3	   // 16 bits of measurement +2 bits of channel ID
+#define ADXL38X_DATA_SIZE_WITHOUT_CH 2 // 16 bits of measurement
+#define NUM_AXES 3					   // X,Y,Z
+
 enum Fault_Codes
 {
 	NO_ERROR,
@@ -65,7 +70,7 @@ enum Fault_Codes
 uint8_t register_value;
 uint8_t status0;
 uint8_t fifo_status[2];
-uint8_t fifo_data[318 * 3];
+uint8_t fifo_data[ADXL38X_FIFO_SIZE * ADXL38X_DATA_SIZE_WITH_CH];
 uint16_t set_fifo_entries = 0x3C; //  60 entries in FIFO
 // uint16_t set_fifo_entries = 0x5A; //  90 entries in FIFO
 uint16_t fifo_entries = 2;
@@ -75,6 +80,9 @@ uint32_t total_samples_read = 0;
 struct adxl38x_fractional_val data_frac[15];
 static char getaxis(uint8_t chID);
 int pos = 0;
+
+// Dplicate entire ADXL buffer in RAM w/ measurement #!
+char serial_buf[ADXL38X_FIFO_SIZE * (4 + NUM_AXES * ADXL38X_DATA_SIZE_WITH_CH)];
 
 // LED vars, enums, and structs
 const uint16_t LED_PIN = PICO_DEFAULT_LED_PIN;
@@ -127,7 +135,7 @@ int32_t fault_handler(int32_t error_code)
 	}
 	if (error_code)
 	{
-		DEBUG_PRINT("Halting due to fault!\n");
+		DEBUG_PRINT("Halting due to fault! Error code: %d, 0x%X\n", error_code, error_code);
 		exit(EXIT_FAILURE);
 	}
 	else
@@ -255,6 +263,46 @@ int32_t config_accelerometer()
 	return (fault_code);
 }
 
+void fifo_data_to_readable_string(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t num_entries, uint32_t num_entries_init_val)
+{
+	uint32_t i, j;
+	uint32_t buff_idx = 0;
+	uint32_t temp_idx = 0;
+
+	for (i = 0; i < num_entries / NUM_AXES; i++)
+	{
+		buff_idx += sprintf(ser_buf + buff_idx, "#%08X", num_entries_init_val + i, buff_idx);
+		for (j = 0; j < NUM_AXES; j++)
+		{
+			temp_idx = (i * NUM_AXES + j) * fifo_read_bytes;
+			buff_idx += sprintf(ser_buf + buff_idx, ", %c%02X%02X", getaxis(adxl_data[temp_idx]), adxl_data[temp_idx + 1], adxl_data[temp_idx + 2], buff_idx);
+		}
+		buff_idx += sprintf(ser_buf + buff_idx, "\n", buff_idx);
+	}
+	ser_buf[buff_idx] = '\0';
+}
+
+uint32_t fifo_data_to_data_stream(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t num_entries, uint32_t num_entries_init_val)
+{
+	uint32_t i, j;
+	uint32_t buff_idx = 0;
+	uint32_t temp_idx = 0;
+
+	for (i = 0; i < num_entries / NUM_AXES; i++)
+	{
+		uint32_t num_entries = num_entries_init_val + i;
+		memcpy(ser_buf + buff_idx, &num_entries, sizeof(num_entries));
+		buff_idx += sizeof(num_entries);
+		for (j = 0; j < NUM_AXES; j++)
+		{
+			temp_idx = (i * NUM_AXES + j) * fifo_read_bytes;
+			memcpy(ser_buf + buff_idx, adxl_data + temp_idx, fifo_read_bytes);
+			buff_idx += fifo_read_bytes;
+		}
+	}
+	return (buff_idx);
+}
+
 int main()
 {
 	int32_t flt_code = 0;
@@ -316,17 +364,17 @@ int main()
 			if (flt_code)
 				fault_handler(SPI_COMM);
 			else
+			{
+				// fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_entries, total_samples_read);
+				// DEBUG_PRINT("%s", serial_buf);
+				uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, set_fifo_entries, total_samples_read);
+				fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write - 1, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
+				fflush(stdout);
 				total_samples_read += set_fifo_entries;
-			// DEBUG_PRINT("FIFO data read successfully\n");
-			// DEBUG_PRINT("Sample Count = %d\n", count);
+			}
 
 			// print raw fifo data
-			for (int b = 0; b < set_fifo_entries * fifo_read_bytes; b += fifo_read_bytes)
-			{
-				DEBUG_PRINT("#%X: %c%02X%02X\n", total_samples_read, getaxis(fifo_data[b]), fifo_data[b + 1], fifo_data[b + 2]);
-			}
 		}
-		sleep_ms(1);
 	}
 	DEBUG_PRINT("End\n");
 	set_led_state(0);
