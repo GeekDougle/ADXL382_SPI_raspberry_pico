@@ -9,6 +9,10 @@
 #include <string.h>
 #include "pico/stdlib.h"
 #include "pico/binary_info.h"
+#include "hardware/pll.h"
+#include "hardware/clocks.h"
+#include "hardware/structs/pll.h"
+#include "hardware/structs/clocks.h"
 #include "hardware/spi.h"
 #include "adxl382.h"
 #include <errno.h>
@@ -37,11 +41,14 @@
    for variations.
 
 */
+#define SYS_CLK_MHZ 200 // Increasing the clock rate of the Pico.
 
 #define ADXL38X_FIFO_SIZE 318		   // Number of entries in the FIFO buffer. Not # of bytes.
 #define ADXL38X_DATA_SIZE_WITH_CH 3	   // 16 bits of measurement +2 bits of channel ID
 #define ADXL38X_DATA_SIZE_WITHOUT_CH 2 // 16 bits of measurement
 #define NUM_AXES 3					   // X,Y,Z
+#define SPI_CLK_MHZ 1000 * 8000		   // This example will use SPI0 at 4MHz
+#define MAX_SEQUENTIAL_FIFO_READS 30   // Max allowed is ((SPI_CLK_MHZ/(16000))-8)/8 assuming ADXL38X_DATA_SIZE_WITH_CH
 
 enum Fault_Codes
 {
@@ -68,12 +75,12 @@ enum Fault_Codes
 	} while (0)
 
 uint8_t register_value;
-uint8_t status0;
+uint8_t status_reg;
 uint8_t fifo_status[2];
 uint8_t fifo_data[ADXL38X_FIFO_SIZE * ADXL38X_DATA_SIZE_WITH_CH];
-uint16_t set_fifo_entries = 0x3C; //  60 entries in FIFO
-// uint16_t set_fifo_entries = 0x5A; //  90 entries in FIFO
-uint16_t fifo_entries = 2;
+uint16_t set_fifo_queue_depth = 0x3C; //  60 entries in FIFO
+// uint16_t set_fifo_queue_depth = 0x5A; //  90 entries in FIFO
+uint16_t fifo_queue_depth = 2;
 bool chID_enable = true; // FIFO channel id
 uint8_t fifo_read_bytes;
 uint32_t total_samples_read = 0;
@@ -142,6 +149,34 @@ int32_t fault_handler(int32_t error_code)
 		return (0);
 }
 
+// from https://github.com/raspberrypi/pico-examples/blob/master/clocks/hello_48MHz/hello_48MHz.c
+void measure_freqs(void)
+{
+	uint f_pll_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_PLL_SYS_CLKSRC_PRIMARY);
+	uint f_pll_usb = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_PLL_USB_CLKSRC_PRIMARY);
+	uint f_rosc = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_ROSC_CLKSRC);
+	uint f_clk_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
+	uint f_clk_peri = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_PERI);
+	uint f_clk_usb = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_USB);
+	uint f_clk_adc = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_ADC);
+#ifdef CLOCKS_FC0_SRC_VALUE_CLK_RTC
+	uint f_clk_rtc = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_RTC);
+#endif
+
+	printf("pll_sys  = %dkHz\n", f_pll_sys);
+	printf("pll_usb  = %dkHz\n", f_pll_usb);
+	printf("rosc     = %dkHz\n", f_rosc);
+	printf("clk_sys  = %dkHz\n", f_clk_sys);
+	printf("clk_peri = %dkHz\n", f_clk_peri);
+	printf("clk_usb  = %dkHz\n", f_clk_usb);
+	printf("clk_adc  = %dkHz\n", f_clk_adc);
+#ifdef CLOCKS_FC0_SRC_VALUE_CLK_RTC
+	printf("clk_rtc  = %dkHz\n", f_clk_rtc);
+#endif
+
+	// Can't measure clk_ref / xosc as it is the ref
+}
+
 int32_t setup_pi_pico()
 {
 	uint8_t fault_code = 0;
@@ -156,7 +191,9 @@ int32_t setup_pi_pico()
 	// Set a new baud rate if needed
 	uart_set_baudrate(uart0, 115200);*/
 	stdio_init_all();
-	sleep_ms(1000);
+	sleep_ms(100);
+	measure_freqs();
+	sleep_ms(100);
 
 #if !defined(spi_default) || !defined(PICO_DEFAULT_SPI_SCK_PIN) || !defined(PICO_DEFAULT_SPI_TX_PIN) || !defined(PICO_DEFAULT_SPI_RX_PIN) || !defined(PICO_DEFAULT_SPI_CSN_PIN)
 #warning spi/adxl382_spi example requires a board with SPI pins
@@ -170,8 +207,7 @@ int32_t setup_pi_pico()
 	{
 
 		DEBUG_PRINT("Hello, adxl382! Reading raw data from registers via SPI...\n");
-		// This example will use SPI0 at 4MHz.
-		spi_init(spi_default, 4000 * 1000);
+		spi_init(spi_default, SPI_CLK_MHZ);
 		// Set SPI format
 		spi_set_format(spi0, // SPI instance
 					   8,	 // Number of bits per transfer
@@ -195,7 +231,7 @@ int32_t setup_pi_pico()
 		{
 			DEBUG_PRINT("SPI is writable\n");
 		}
-		sleep_ms(1000);
+		sleep_ms(100);
 	}
 	return (fault_code);
 }
@@ -229,11 +265,11 @@ int32_t config_accelerometer()
 	// Set FIFO_CFG0 to 0x60 (Channel ID enable and FIFO stream mode)
 	if (!fault_code)
 	{
-		fault_code = adxl38x_accel_set_FIFO(set_fifo_entries,
+		fault_code = adxl38x_accel_set_FIFO(set_fifo_queue_depth,
 											false, ADXL38X_FIFO_STREAM, true, false);
 	}
 	if (!fault_code)
-		DEBUG_PRINT("Set FIFO_CFG0 to 0x%X (Channel ID enable and FIFO stream mode, set FIFO_SAMPLES to %d)\n", set_fifo_entries, set_fifo_entries);
+		DEBUG_PRINT("Set FIFO_CFG0 to 0x%X (Channel ID enable and FIFO stream mode, set FIFO_SAMPLES to %d)\n", set_fifo_queue_depth, set_fifo_queue_depth);
 
 	// Set INT0_MAP0 to 0x08 (FIFO_WATERMARK_INT0)
 	if (!fault_code)
@@ -325,6 +361,7 @@ int main()
 	DEBUG_PRINT("USB port is successfully initialised\n");
 
 	flt_code = config_accelerometer();
+	sleep_ms(10);
 	if (flt_code)
 		DEBUG_PRINT("ADXL is successfully initialised\n");
 	else
@@ -339,42 +376,61 @@ int main()
 		// DEBUG_PRINT("Starting watermark check\n");
 
 		// Read status to assert if FIFO_WATERMARK bit set
-		flt_code = read_register(ADXL38X_STATUS0, 1, &status0);
+		flt_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
 		if (flt_code)
 			fault_handler(SPI_COMM);
-		flt_code = read_register(ADXL38X_FIFO_STATUS0, 2, fifo_status);
-		if (flt_code)
-			fault_handler(SPI_COMM);
-		fifo_entries = (fifo_status[0] | ((uint16_t)fifo_status[1] << 8));
-		fifo_entries = fifo_entries & 0x01ff;
 
-		// clear fifo_data buffer
-		memset(fifo_data, 0, sizeof(fifo_data));
-
-		// Read FIFO status and data if FIFO_WATERMARK is set
-		if (status0 & (1 << 3))
+		if (status_reg & (1 << 3))
 		{
-			count += set_fifo_entries;
-			// DEBUG_PRINT("Fifo entries =  %d\n", fifo_entries);
-			if (fifo_entries < set_fifo_entries)
-				fault_handler(FIFO_UNMATCH);
-			// Read data from FIFO (can read at least upto 12 samples * 3 bytes (chID, data))
-			// DEBUG_PRINT("Reading %d bytes from FIFO\n", set_fifo_entries*fifo_read_bytes);
-			flt_code = read_register(ADXL38X_FIFO_DATA, set_fifo_entries * fifo_read_bytes, fifo_data);
-			if (flt_code)
-				fault_handler(SPI_COMM);
-			else
+			// Read FIFO status and data if FIFO_WATERMARK is set
+			do
 			{
-				// fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_entries, total_samples_read);
-				// DEBUG_PRINT("%s", serial_buf);
-				uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, set_fifo_entries, total_samples_read);
-				fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write - 1, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
-				fflush(stdout);
-				total_samples_read += set_fifo_entries;
-			}
+				flt_code = read_register(ADXL38X_FIFO_STATUS0, 2, fifo_status);
+				if (flt_code)
+					fault_handler(SPI_COMM);
+				fifo_queue_depth = (fifo_status[0] | ((uint16_t)fifo_status[1] << 8));
+				fifo_queue_depth = fifo_queue_depth & 0x01ff;
+				// DEBUG_PRINT("Fifo entries =  %d\n", fifo_queue_depth);
 
-			// print raw fifo data
+				// clear fifo_data buffer
+				memset(fifo_data, 0, sizeof(fifo_data));
+
+				// set how many datapoints to read based on clockrate
+				uint32_t num_entries_to_read = 0;
+				if (fifo_queue_depth > MAX_SEQUENTIAL_FIFO_READS)
+				{
+					num_entries_to_read = MAX_SEQUENTIAL_FIFO_READS;
+				}
+				else
+					num_entries_to_read = fifo_queue_depth;
+				// wait for the measurement in progress to finish
+				do
+				{
+					flt_code = read_register(ADXL38X_STATUS3, 1, &status_reg);
+					if (flt_code)
+						fault_handler(SPI_COMM);
+				} while (!(status_reg & (0x01)));
+
+				// read the data & process to USB-->UART
+				flt_code = read_register(ADXL38X_FIFO_DATA, fifo_queue_depth * fifo_read_bytes, fifo_data);
+				if (flt_code)
+					fault_handler(SPI_COMM);
+				else
+				{
+					// fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_queue_depth, total_samples_read);
+					// DEBUG_PRINT("%s", serial_buf);
+					uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, set_fifo_queue_depth, total_samples_read);
+					fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write - 1, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
+					fflush(stdout);
+					// Update counters
+					total_samples_read += num_entries_to_read;
+					fifo_queue_depth -= num_entries_to_read;
+				}
+
+			} while (fifo_queue_depth > 0);
 		}
+		else
+			sleep_us(65);
 	}
 	DEBUG_PRINT("End\n");
 	set_led_state(0);
