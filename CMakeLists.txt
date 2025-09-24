@@ -48,4 +48,3 @@ target_link_libraries(adxl382_spi pico_stdlib hardware_spi)
 # create map/bin/hex file etc.
 pico_add_extra_outputs(adxl382_spi)
 
-# add url via pico_set_program_url

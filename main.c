@@ -41,14 +41,13 @@
    for variations.
 
 */
-#define SYS_CLK_MHZ 200 // Increasing the clock rate of the Pico.
 
 #define ADXL38X_FIFO_SIZE 318		   // Number of entries in the FIFO buffer. Not # of bytes.
 #define ADXL38X_DATA_SIZE_WITH_CH 3	   // 16 bits of measurement +2 bits of channel ID
 #define ADXL38X_DATA_SIZE_WITHOUT_CH 2 // 16 bits of measurement
 #define NUM_AXES 3					   // X,Y,Z
 #define SPI_CLK_MHZ 1000 * 8000		   // This example will use SPI0 at 4MHz
-#define MAX_SEQUENTIAL_FIFO_READS 30   // Max allowed is ((SPI_CLK_MHZ/(16000))-8)/8 assuming ADXL38X_DATA_SIZE_WITH_CH
+#define MAX_SEQUENTIAL_FIFO_READS 12   // Max allowed is ((SPI_CLK_MHZ/(16000))-8)/24 assuming ADXL38X_DATA_SIZE_WITH_CH
 
 enum Fault_Codes
 {
@@ -192,7 +191,17 @@ int32_t setup_pi_pico()
 	uart_set_baudrate(uart0, 115200);*/
 	stdio_init_all();
 	sleep_ms(100);
-	measure_freqs();
+	// Set the system clock to 200MHz
+	if (set_sys_clock_khz(200000, true))
+	{
+		printf("Clock set to 200 MHz\n");
+	}
+	else
+	{
+		printf("Failed to set clock\n");
+	}
+	// Re init uart now that clk_peri has changed
+	stdio_init_all();
 	sleep_ms(100);
 
 #if !defined(spi_default) || !defined(PICO_DEFAULT_SPI_SCK_PIN) || !defined(PICO_DEFAULT_SPI_TX_PIN) || !defined(PICO_DEFAULT_SPI_RX_PIN) || !defined(PICO_DEFAULT_SPI_CSN_PIN)
@@ -324,11 +333,12 @@ uint32_t fifo_data_to_data_stream(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t
 	uint32_t buff_idx = 0;
 	uint32_t temp_idx = 0;
 
+	// One "sample" is data from all the axes, so read all axes, then increment counter.
 	for (i = 0; i < num_entries / NUM_AXES; i++)
 	{
-		uint32_t num_entries = num_entries_init_val + i;
-		memcpy(ser_buf + buff_idx, &num_entries, sizeof(num_entries));
-		buff_idx += sizeof(num_entries);
+		uint32_t count = num_entries_init_val + i;
+		memcpy(ser_buf + buff_idx, &count, sizeof(count));
+		buff_idx += sizeof(count);
 		for (j = 0; j < NUM_AXES; j++)
 		{
 			temp_idx = (i * NUM_AXES + j) * fifo_read_bytes;
@@ -375,7 +385,7 @@ int main()
 
 		// DEBUG_PRINT("Starting watermark check\n");
 
-		// Read status to assert if FIFO_WATERMARK bit set
+		// Read status to determine if FIFO_WATERMARK bit set
 		flt_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
 		if (flt_code)
 			fault_handler(SPI_COMM);
@@ -393,7 +403,7 @@ int main()
 				// DEBUG_PRINT("Fifo entries =  %d\n", fifo_queue_depth);
 
 				// clear fifo_data buffer
-				memset(fifo_data, 0, sizeof(fifo_data));
+				// memset(fifo_data, 0, sizeof(fifo_data));
 
 				// set how many datapoints to read based on clockrate
 				uint32_t num_entries_to_read = 0;
@@ -403,7 +413,9 @@ int main()
 				}
 				else
 					num_entries_to_read = fifo_queue_depth;
-				// wait for the measurement in progress to finish
+
+				// DEBUG_PRINT("Reading %u entries", num_entries_to_read);
+				//  wait for the measurement in progress to finish
 				do
 				{
 					flt_code = read_register(ADXL38X_STATUS3, 1, &status_reg);
@@ -412,25 +424,24 @@ int main()
 				} while (!(status_reg & (0x01)));
 
 				// read the data & process to USB-->UART
-				flt_code = read_register(ADXL38X_FIFO_DATA, fifo_queue_depth * fifo_read_bytes, fifo_data);
+				flt_code = read_register(ADXL38X_FIFO_DATA, num_entries_to_read * fifo_read_bytes, fifo_data);
 				if (flt_code)
 					fault_handler(SPI_COMM);
 				else
 				{
 					// fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_queue_depth, total_samples_read);
 					// DEBUG_PRINT("%s", serial_buf);
-					uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, set_fifo_queue_depth, total_samples_read);
+					uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, num_entries_to_read, total_samples_read);
 					fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write - 1, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
 					fflush(stdout);
 					// Update counters
 					total_samples_read += num_entries_to_read;
 					fifo_queue_depth -= num_entries_to_read;
 				}
-
 			} while (fifo_queue_depth > 0);
 		}
 		else
-			sleep_us(65);
+			sleep_us(5);
 	}
 	DEBUG_PRINT("End\n");
 	set_led_state(0);
