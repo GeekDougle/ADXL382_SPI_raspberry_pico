@@ -320,7 +320,7 @@ void fifo_data_to_readable_string(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t
 
 	for (i = 0; i < num_entries / NUM_AXES; i++)
 	{
-		buff_idx += sprintf(ser_buf + buff_idx, "#%08X", num_entries_init_val + i, buff_idx);
+		buff_idx += sprintf(ser_buf + buff_idx, "#%08X", num_entries_init_val + i, buff_idx); // TODO this is no longer correct.  Need to fix the idea of a sample vs an entry to resolve this.
 		for (j = 0; j < NUM_AXES; j++)
 		{
 			temp_idx = (i * NUM_AXES + j) * fifo_read_bytes;
@@ -333,22 +333,22 @@ void fifo_data_to_readable_string(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t
 
 uint32_t fifo_data_to_data_stream(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t num_entries, uint32_t num_entries_init_val)
 {
-	uint32_t i, j;
+	uint32_t i;
 	uint32_t buff_idx = 0;
 	uint32_t temp_idx = 0;
 
-	// One "sample" is data from all the axes, so read all axes, then increment counter.
-	for (i = 0; i < num_entries / NUM_AXES; i++)
+	// One "sample" is data from all the axes, so read all axes, then put the entry counter
+	// Can't guarantee we will get an integer multiple of NUM_AXES, so need to use the axes ID to determine the start of a "sample"
+	for (i = 0; i < num_entries; i++)
 	{
-		uint32_t count = num_entries_init_val + i;
-		memcpy(ser_buf + buff_idx, &count, sizeof(count));
-		buff_idx += sizeof(count);
-		for (j = 0; j < NUM_AXES; j++)
+		if (adxl_data[i * fifo_read_bytes] == 0)
 		{
-			temp_idx = (i * NUM_AXES + j) * fifo_read_bytes;
-			memcpy(ser_buf + buff_idx, adxl_data + temp_idx, fifo_read_bytes);
-			buff_idx += fifo_read_bytes;
+			uint32_t count = num_entries_init_val + i;
+			memcpy(ser_buf + buff_idx, &count, sizeof(count));
+			buff_idx += sizeof(count);
 		}
+		memcpy(ser_buf + buff_idx, adxl_data + i * fifo_read_bytes, fifo_read_bytes);
+		buff_idx += fifo_read_bytes;
 	}
 	return (buff_idx);
 }
@@ -395,8 +395,8 @@ int main()
 
 		if (status_reg & (1 << 1))
 		{
-			DEBUG_PRINT("Fifo OVFLW");
-			// fault_handler(FIFO_OVERFLOW);
+			// DEBUG_PRINT("Fifo OVFLW");
+			fault_handler(FIFO_OVERFLOW);
 		}
 		if (status_reg & (1 << 3))
 		{
@@ -430,11 +430,13 @@ int main()
 					fault_handler(SPI_COMM);
 				else
 				{
-					fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_queue_depth, total_samples_read);
-					DEBUG_PRINT("%s", serial_buf);
-					// uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, num_entries_to_read, total_samples_read);
-					// fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write - 1, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
-					// fflush(stdout);
+					// fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_queue_depth, total_samples_read);
+					// DEBUG_PRINT("%s", serial_buf);
+					uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, num_entries_to_read, total_samples_read);
+					// DEBUG_PRINT("%u bytes", bytes_to_write);
+					sleep_us(50);													   // This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
+					fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
+					fflush(stdout);
 					//  Update counters
 					total_samples_read += num_entries_to_read;
 					fifo_queue_depth -= num_entries_to_read;
