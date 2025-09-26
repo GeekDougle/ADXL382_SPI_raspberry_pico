@@ -77,8 +77,7 @@ uint8_t register_value;
 uint8_t status_reg;
 uint8_t fifo_status[2];
 uint8_t fifo_data[ADXL38X_FIFO_SIZE * ADXL38X_DATA_SIZE_WITH_CH];
-uint16_t set_fifo_queue_depth = 0x3C; //  60 entries in FIFO
-// uint16_t set_fifo_queue_depth = 0x5A; //  90 entries in FIFO
+uint16_t set_fifo_queue_depth = 0x12;
 uint16_t fifo_queue_depth = 2;
 bool chID_enable = true; // FIFO channel id
 uint8_t fifo_read_bytes;
@@ -192,14 +191,7 @@ int32_t setup_pi_pico()
 	stdio_init_all();
 	sleep_ms(100);
 	// Set the system clock to 200MHz
-	if (set_sys_clock_khz(200000, true))
-	{
-		printf("Clock set to 200 MHz\n");
-	}
-	else
-	{
-		printf("Failed to set clock\n");
-	}
+	set_sys_clock_khz(200000, true);
 	// Re init uart now that clk_peri has changed
 	stdio_init_all();
 	sleep_ms(100);
@@ -298,7 +290,7 @@ int32_t config_accelerometer()
 	{
 		DEBUG_PRINT("Device is in HP mode\n");
 		// WAIT 500ms after going into HP mode.
-		sleep_ms(500);
+		sleep_ms(100);
 		// Set the number of bytes to read per sample
 		if (chID_enable)
 			fifo_read_bytes = 3;
@@ -390,6 +382,8 @@ int main()
 		if (flt_code)
 			fault_handler(SPI_COMM);
 
+		if (status_reg & (1 << 2))
+			DEBUG_PRINT("Fifo OVFLW");
 		if (status_reg & (1 << 3))
 		{
 			// Read FIFO status and data if FIFO_WATERMARK is set
@@ -413,15 +407,6 @@ int main()
 				}
 				else
 					num_entries_to_read = fifo_queue_depth;
-
-				// DEBUG_PRINT("Reading %u entries", num_entries_to_read);
-				//  wait for the measurement in progress to finish
-				do
-				{
-					flt_code = read_register(ADXL38X_STATUS3, 1, &status_reg);
-					if (flt_code)
-						fault_handler(SPI_COMM);
-				} while (!(status_reg & (0x01)));
 
 				// read the data & process to USB-->UART
 				flt_code = read_register(ADXL38X_FIFO_DATA, num_entries_to_read * fifo_read_bytes, fifo_data);
