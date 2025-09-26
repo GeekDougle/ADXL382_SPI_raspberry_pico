@@ -55,6 +55,10 @@ target_link_libraries(adxl382_spi pico_stdlib hardware_spi)
 #execute all code in RAM for speed.
 pico_set_binary_type(adxl382_spi no_flash)
 
+#increase USB TX buffer sizes to support faster transfer rates.
+target_compile_definitions(adxl382_spi PUBLIC CFG_TUD_CDC_TX_BUFSIZE=1024)
+target_compile_definitions(adxl382_spi PUBLIC CFG_TUD_CDC_EP_BUFSIZE=1024)
+
 # create map/bin/hex file etc.
 pico_add_extra_outputs(adxl382_spi)
 

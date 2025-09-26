@@ -527,7 +527,7 @@ int main()
 			uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
 			// DEBUG_PRINT("%u bytes", bytes_to_write);																															// This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
 			fwrite(serialBuffers.buf[serialBuffers.active].data, sizeof(&serialBuffers.buf[serialBuffers.active].data[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
-			fflush(stdout);
+			// fflush(stdout);  Don't block.
 
 			serialBuffers.active++;
 			if (serialBuffers.active >= NUM_UART_BUFFERS)
