@@ -17,6 +17,7 @@
 #include "adxl382.h"
 #include <errno.h>
 #include "hardware/uart.h"
+#include "pico/critical_section.h"
 
 /* Example code to talk to a ADXL382 acceleromater sensor via SPI.
 
@@ -78,7 +79,7 @@ uint8_t register_value;
 uint8_t status_reg;
 uint8_t fifo_status[2];
 uint8_t fifo_data[ADXL38X_FIFO_SIZE * ADXL38X_DATA_SIZE_WITH_CH];
-uint16_t set_fifo_queue_depth = 0x12;
+uint16_t set_fifo_queue_depth = MAX_SEQUENTIAL_FIFO_READS;
 uint16_t fifo_queue_depth = 2;
 bool chID_enable = true; // FIFO channel id
 uint8_t fifo_read_bytes;
@@ -93,6 +94,9 @@ char serial_buf[ADXL38X_FIFO_SIZE * (4 + NUM_AXES * ADXL38X_DATA_SIZE_WITH_CH)];
 // LED vars, enums, and structs
 const uint16_t LED_PIN = PICO_DEFAULT_LED_PIN;
 volatile uint8_t led_state = 0;
+
+// For pausing ints during critical sections.
+critical_section_t my_critical_section;
 
 void set_led_state(uint8_t state)
 {
@@ -180,6 +184,7 @@ int32_t setup_pi_pico()
 {
 	uint8_t fault_code = 0;
 
+	critical_section_init(&my_critical_section);
 	gpio_init(LED_PIN);
 	gpio_set_dir(LED_PIN, GPIO_OUT);
 	// Initialize UART0 with a baud rate of 9600
@@ -418,7 +423,9 @@ int main()
 					num_entries_to_read = fifo_queue_depth;
 
 				// read the data & process to USB-->UART
+				critical_section_enter_blocking(&my_critical_section);
 				flt_code = read_register(ADXL38X_FIFO_DATA, num_entries_to_read * fifo_read_bytes, fifo_data);
+				critical_section_exit(&my_critical_section);
 				if (flt_code)
 					fault_handler(SPI_COMM);
 				else
