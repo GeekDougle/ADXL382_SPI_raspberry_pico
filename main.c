@@ -49,6 +49,9 @@
 #define NUM_AXES 3					   // X,Y,Z
 #define SPI_CLK_MHZ 1000 * 8000		   // This example will use SPI0 at 4MHz
 #define MAX_SEQUENTIAL_FIFO_READS 12   // Max allowed is ((SPI_CLK_MHZ/(16000))-8)/24 assuming ADXL38X_DATA_SIZE_WITH_CH
+#define FIFO_DATA_BUFFER_SIZE ADXL38X_FIFO_SIZE *ADXL38X_DATA_SIZE_WITH_CH
+#define UART_BUF_SIZE 1024 * 2 // Lots of RAM, FIFO is only 320 max of 3 byte entries.  This gives lots of room for any overhead to make it human readable.
+#define NUM_UART_BUFFERS 2
 
 enum Fault_Codes
 {
@@ -75,21 +78,30 @@ enum Fault_Codes
 		fflush(stdout);      \
 	} while (0)
 
+// A single buffer
+typedef struct
+{
+	uint8_t *data;		 // pointer to memory
+	size_t size;		 // total capacity
+	size_t num_elements; // number of elements in buffer
+} Buffer_t;
+
+// Double buffer wrapper
+typedef struct
+{
+	Buffer_t buf[NUM_UART_BUFFERS]; // 2 or more buffers
+	uint8_t active;					// index of the buffer (0 or 1)
+} DoubleBuffer_t;
+
 uint8_t register_value;
 uint8_t status_reg;
 uint8_t fifo_status[2];
-uint8_t fifo_data[ADXL38X_FIFO_SIZE * ADXL38X_DATA_SIZE_WITH_CH];
+uint8_t fifo_data[FIFO_DATA_BUFFER_SIZE]; // Can fit max possible size
 uint16_t set_fifo_queue_depth = MAX_SEQUENTIAL_FIFO_READS;
-uint16_t fifo_queue_depth = 2;
-bool chID_enable = true; // FIFO channel id
-uint8_t fifo_read_bytes;
-uint32_t total_samples_read = 0;
-struct adxl38x_fractional_val data_frac[15];
-static char getaxis(uint8_t chID);
-int pos = 0;
 
-// Dplicate entire ADXL buffer in RAM w/ measurement #!
-char serial_buf[ADXL38X_FIFO_SIZE * (4 + NUM_AXES * ADXL38X_DATA_SIZE_WITH_CH)];
+DoubleBuffer_t serialBuffers;
+uint8_t uart_buff0[UART_BUF_SIZE];
+uint8_t uart_buff1[UART_BUF_SIZE];
 
 // LED vars, enums, and structs
 const uint16_t LED_PIN = PICO_DEFAULT_LED_PIN;
@@ -97,6 +109,29 @@ volatile uint8_t led_state = 0;
 
 // For pausing ints during critical sections.
 critical_section_t my_critical_section;
+
+/***************************************************************************/
+/**
+ * @brief Assigns axis based on channel index
+ *
+ * @param chID         - Channel index
+ *
+ * @return ret         - Corresponding channel ID for channel index provided
+ *******************************************************************************/
+static char getaxis(uint8_t chID)
+{
+	if (chID)
+		return chID > 1 ? 'z' : 'y';
+	return 'x';
+}
+
+// initialize a buffer
+void buffer_init(Buffer_t *b, uint8_t *storage, size_t size)
+{
+	b->data = storage;
+	b->size = size;
+	b->num_elements = 0;
+}
 
 void set_led_state(uint8_t state)
 {
@@ -297,41 +332,59 @@ int32_t config_accelerometer()
 		DEBUG_PRINT("Device is in HP mode\n");
 		// WAIT 500ms after going into HP mode.
 		sleep_ms(100);
-		// Set the number of bytes to read per sample
-		if (chID_enable)
-			fifo_read_bytes = 3;
-		else
-			fifo_read_bytes = 2;
 	}
-	// Empty the buffer
-	fault_code = read_register(ADXL38X_FIFO_DATA, ADXL38X_FIFO_SIZE * fifo_read_bytes, fifo_data);
-	// Read status to clear full bit
-	fault_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
-	if (fault_code)
-		fault_handler(SPI_COMM);
-	return (fault_code);
 }
 
-void fifo_data_to_readable_string(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t num_entries, uint32_t num_entries_init_val)
+uint32_t clear_data_ready_flag(void)
+// reads the high and low byte data registers for all enabled axes to clear the Data ready flag.
+// The data should already be in the FIFO, so can throw this away
+{
+	uint8_t junk_buf[NUM_AXES * ADXL38X_DATA_SIZE_WITH_CH];
+	int32_t flt_code;
+
+	// Address will show as 0x2B on logic analyzer due to R/W bit.
+	flt_code = read_register(ADXL38X_XDATA_H, NUM_AXES * 2, junk_buf);
+	return (flt_code);
+}
+
+uint32_t empty_fifo_buffer(void)
+// reads the entire FIFO buffer and then reads the status byte to clear the FIFO flags.
+// TODO: ensure the buffer is pointing to first axis.  I have seen some cases where the next data read is from axis 2.
+{
+	uint8_t junk_buf[NUM_AXES * ADXL38X_DATA_SIZE_WITH_CH];
+	int32_t flt_code;
+
+	// Empty the buffer
+	flt_code = read_register(ADXL38X_FIFO_DATA, ADXL38X_FIFO_SIZE * ADXL38X_DATA_SIZE_WITH_CH, fifo_data);
+	// Read status to clear full bit. Address will show as 0x23 on logic analyzer due to R/W bit.
+	flt_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
+	return (flt_code);
+}
+
+void fifo_data_to_readable_string(uint8_t *adxl_data, Buffer_t *ser_buf, uint32_t num_entries, uint32_t num_entries_init_val)
 {
 	uint32_t i, j;
 	uint32_t buff_idx = 0;
 	uint32_t temp_idx = 0;
 
+	ser_buf->num_elements = 0;
 	for (i = 0; i < num_entries / NUM_AXES; i++)
 	{
-		buff_idx += sprintf(ser_buf + buff_idx, "#%08X", num_entries_init_val + i, buff_idx); // TODO this is no longer correct.  Need to fix the idea of a sample vs an entry to resolve this.
+		buff_idx = ser_buf->num_elements;
+		ser_buf->num_elements += sprintf((ser_buf->data) + buff_idx, "#%08X", num_entries_init_val + i, buff_idx); // TODO this is no longer correct.  Need to fix the idea of a sample vs an entry to resolve this.
 		for (j = 0; j < NUM_AXES; j++)
 		{
-			temp_idx = (i * NUM_AXES + j) * fifo_read_bytes;
-			buff_idx += sprintf(ser_buf + buff_idx, ", %c%02X%02X", getaxis(adxl_data[temp_idx]), adxl_data[temp_idx + 1], adxl_data[temp_idx + 2], buff_idx);
+			temp_idx = (i * NUM_AXES + j) * ADXL38X_DATA_SIZE_WITH_CH;
+			buff_idx = ser_buf->num_elements;
+			ser_buf->num_elements += sprintf((ser_buf->data) + buff_idx, ", %c%02X%02X", getaxis(adxl_data[temp_idx]), adxl_data[temp_idx + 1], adxl_data[temp_idx + 2], buff_idx);
 		}
-		buff_idx += sprintf(ser_buf + buff_idx, "\n", buff_idx);
+		ser_buf->num_elements += sprintf((ser_buf->data) + ser_buf->num_elements, "\n", ser_buf->num_elements);
 	}
-	ser_buf[buff_idx] = '\0';
+	ser_buf->data[ser_buf->num_elements] = '\0';
+	ser_buf->num_elements++;
 }
 
-uint32_t fifo_data_to_data_stream(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t num_entries, uint32_t num_entries_init_val)
+uint32_t fifo_data_to_data_stream(uint8_t *adxl_data, Buffer_t *ser_buf, uint32_t num_entries, uint32_t num_entries_init_val)
 {
 	uint32_t i;
 	uint32_t buff_idx = 0;
@@ -339,30 +392,37 @@ uint32_t fifo_data_to_data_stream(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t
 
 	// One "sample" is data from all the axes, so read all axes, then put the entry counter
 	// Can't guarantee we will get an integer multiple of NUM_AXES, so need to use the axes ID to determine the start of a "sample"
+	ser_buf->num_elements = 0;
 	for (i = 0; i < num_entries; i++)
 	{
-		if (adxl_data[i * fifo_read_bytes] == 0)
+		if (adxl_data[i * ADXL38X_DATA_SIZE_WITH_CH] == 0)
 		{
 			uint32_t count = num_entries_init_val + i;
-			memcpy(ser_buf + buff_idx, &count, sizeof(count));
-			buff_idx += sizeof(count);
+			memcpy((ser_buf->data) + ser_buf->num_elements, &count, sizeof(count));
+			ser_buf->num_elements += sizeof(count);
 		}
-		memcpy(ser_buf + buff_idx, adxl_data + i * fifo_read_bytes, fifo_read_bytes);
-		buff_idx += fifo_read_bytes;
+		memcpy((ser_buf->data) + ser_buf->num_elements, adxl_data + i * ADXL38X_DATA_SIZE_WITH_CH, ADXL38X_DATA_SIZE_WITH_CH);
+		ser_buf->num_elements += ADXL38X_DATA_SIZE_WITH_CH;
 	}
-	return (buff_idx);
+	return (ser_buf->num_elements);
 }
 
 int main()
 {
 	int32_t flt_code = 0;
-	uint32_t count = 0;
+	uint32_t total_samples_read = 0;
+	uint16_t fifo_queue_depth;
 
 	if (setup_pi_pico())
 	{
 		fault_handler(BOOT_ERROR);
 	};
 	set_led_state(1);
+
+	// init double buffer for USB/UART interface
+	buffer_init(&serialBuffers.buf[0], uart_buff0, UART_BUF_SIZE);
+	buffer_init(&serialBuffers.buf[1], uart_buff1, UART_BUF_SIZE);
+	serialBuffers.active = 0;
 
 	// Wait for USB.  Flash LED.
 	while (!stdio_usb_connected())
@@ -375,20 +435,20 @@ int main()
 	DEBUG_PRINT("USB port is successfully initialised\n");
 
 	flt_code = config_accelerometer();
-	if (flt_code)
+	empty_fifo_buffer();
+	clear_data_ready_flag();
+	if (flt_code) // TODO fix this.  It doesn't print, so I don't think this catches errors correctly.
 		DEBUG_PRINT("ADXL is successfully initialised\n");
 	else
 		fault_handler(flt_code);
 
 	// reset count
-	count = 0;
+	total_samples_read = 0;
+	// DEBUG_PRINT("Starting normal operation check\n");
+	set_led_state(1);
 	while (true)
 	{
-		set_led_state(1);
-
-		// DEBUG_PRINT("Starting watermark check\n");
-
-		// Read status to determine if FIFO_WATERMARK bit set
+		// Read status to determine if FIFO_WATERMARK bit set. Address will show as 0x23 on logic analyzer due to R/W bit.
 		flt_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
 		if (flt_code)
 			fault_handler(SPI_COMM);
@@ -403,13 +463,13 @@ int main()
 			// Read FIFO status and data if FIFO_WATERMARK is set
 			do
 			{
-				flt_code = read_register(ADXL38X_FIFO_STATUS0, 2, fifo_status);
+				flt_code = read_register(ADXL38X_FIFO_STATUS0, 2, fifo_status); // Address will show as 0x3D on logic analyzer due to R/W bit.
 				if (flt_code)
 					fault_handler(SPI_COMM);
 				fifo_queue_depth = (fifo_status[0] | ((uint16_t)fifo_status[1] << 8));
 				fifo_queue_depth = fifo_queue_depth & 0x01ff;
 				// DEBUG_PRINT("Fifo entries =  %d\n", fifo_queue_depth);
-				// check if we read the number of FIFO entries wrong.
+				//  check if we read the number of FIFO entries wrong.
 				if (fifo_queue_depth > ADXL38X_FIFO_SIZE)
 					fault_handler(FIFO_UNMATCH);
 
@@ -424,19 +484,24 @@ int main()
 
 				// read the data & process to USB-->UART
 				critical_section_enter_blocking(&my_critical_section);
-				flt_code = read_register(ADXL38X_FIFO_DATA, num_entries_to_read * fifo_read_bytes, fifo_data);
+				flt_code = read_register(ADXL38X_FIFO_DATA, num_entries_to_read * ADXL38X_DATA_SIZE_WITH_CH, fifo_data); // Address will show as 0x3B on logic analyzer due to R/W bit.
 				critical_section_exit(&my_critical_section);
 				if (flt_code)
 					fault_handler(SPI_COMM);
 				else
 				{
-					// fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_queue_depth, total_samples_read);
-					// DEBUG_PRINT("%s", serial_buf);
-					uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, num_entries_to_read, total_samples_read);
+					// fifo_data_to_readable_string(fifo_data, &serialBuffers.buf[serialBuffers.active], set_fifo_queue_depth, total_samples_read);
+					//  DEBUG_PRINT("%s", serialBuffers.buf[serialBuffers.active].data);
+					uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, &serialBuffers.buf[serialBuffers.active], num_entries_to_read, total_samples_read);
 					// DEBUG_PRINT("%u bytes", bytes_to_write);
-					sleep_us(50);													   // This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
-					fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
+					// sleep_us(50);																															// This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
+					fwrite(serialBuffers.buf[serialBuffers.active].data, sizeof(&serialBuffers.buf[serialBuffers.active].data[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
 					fflush(stdout);
+
+					serialBuffers.active++;
+					if (serialBuffers.active >= NUM_UART_BUFFERS)
+						serialBuffers.active = 0;
+
 					//  Update counters
 					total_samples_read += num_entries_to_read;
 					fifo_queue_depth -= num_entries_to_read;
@@ -446,19 +511,4 @@ int main()
 	}
 	DEBUG_PRINT("End\n");
 	set_led_state(0);
-}
-
-/***************************************************************************/
-/**
- * @brief Assigns axis based on channel index
- *
- * @param chID         - Channel index
- *
- * @return ret         - Corresponding channel ID for channel index provided
- *******************************************************************************/
-static char getaxis(uint8_t chID)
-{
-	if (chID)
-		return chID > 1 ? 'z' : 'y';
-	return 'x';
 }
