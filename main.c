@@ -56,7 +56,8 @@ enum Fault_Codes
 	FIFO_UNMATCH,
 	BOOT_ERROR,
 	SPI_PIN_DEF_ERROR,
-	ACCEL_INIT_ERROR
+	ACCEL_INIT_ERROR,
+	FIFO_OVERFLOW
 };
 
 #define DEBUG_PRINT(msg, ...)       \
@@ -297,6 +298,12 @@ int32_t config_accelerometer()
 		else
 			fifo_read_bytes = 2;
 	}
+	// Empty the buffer
+	fault_code = read_register(ADXL38X_FIFO_DATA, ADXL38X_FIFO_SIZE * fifo_read_bytes, fifo_data);
+	// Read status to clear full bit
+	fault_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
+	if (fault_code)
+		fault_handler(SPI_COMM);
 	return (fault_code);
 }
 
@@ -363,7 +370,6 @@ int main()
 	DEBUG_PRINT("USB port is successfully initialised\n");
 
 	flt_code = config_accelerometer();
-	sleep_ms(10);
 	if (flt_code)
 		DEBUG_PRINT("ADXL is successfully initialised\n");
 	else
@@ -382,8 +388,11 @@ int main()
 		if (flt_code)
 			fault_handler(SPI_COMM);
 
-		if (status_reg & (1 << 2))
+		if (status_reg & (1 << 1))
+		{
 			DEBUG_PRINT("Fifo OVFLW");
+			// fault_handler(FIFO_OVERFLOW);
+		}
 		if (status_reg & (1 << 3))
 		{
 			// Read FIFO status and data if FIFO_WATERMARK is set
@@ -395,9 +404,9 @@ int main()
 				fifo_queue_depth = (fifo_status[0] | ((uint16_t)fifo_status[1] << 8));
 				fifo_queue_depth = fifo_queue_depth & 0x01ff;
 				// DEBUG_PRINT("Fifo entries =  %d\n", fifo_queue_depth);
-
-				// clear fifo_data buffer
-				// memset(fifo_data, 0, sizeof(fifo_data));
+				// check if we read the number of FIFO entries wrong.
+				if (fifo_queue_depth > ADXL38X_FIFO_SIZE)
+					fault_handler(FIFO_UNMATCH);
 
 				// set how many datapoints to read based on clockrate
 				uint32_t num_entries_to_read = 0;
@@ -414,19 +423,17 @@ int main()
 					fault_handler(SPI_COMM);
 				else
 				{
-					// fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_queue_depth, total_samples_read);
-					// DEBUG_PRINT("%s", serial_buf);
-					uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, num_entries_to_read, total_samples_read);
-					fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write - 1, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
-					fflush(stdout);
-					// Update counters
+					fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_queue_depth, total_samples_read);
+					DEBUG_PRINT("%s", serial_buf);
+					// uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, num_entries_to_read, total_samples_read);
+					// fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write - 1, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
+					// fflush(stdout);
+					//  Update counters
 					total_samples_read += num_entries_to_read;
 					fifo_queue_depth -= num_entries_to_read;
 				}
 			} while (fifo_queue_depth > 0);
 		}
-		else
-			sleep_us(5);
 	}
 	DEBUG_PRINT("End\n");
 	set_led_state(0);
