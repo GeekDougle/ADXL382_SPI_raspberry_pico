@@ -407,6 +407,58 @@ uint32_t fifo_data_to_data_stream(uint8_t *adxl_data, Buffer_t *ser_buf, uint32_
 	return (ser_buf->num_elements);
 }
 
+uint32_t read_fifo_to_empty(void)
+{
+	int32_t flt_code;
+	uint32_t num_entries_to_read;
+	uint32_t fifo_queue_depth;
+	uint32_t count = 0;
+
+	do
+	{
+		// FIFO watermark flag is set, so we know to read at least that many data points
+		num_entries_to_read = MAX_SEQUENTIAL_FIFO_READS;
+		// read the data from FIFO
+		critical_section_enter_blocking(&my_critical_section);
+		flt_code = read_register(ADXL38X_FIFO_DATA, num_entries_to_read * ADXL38X_DATA_SIZE_WITH_CH, fifo_data + (count * ADXL38X_DATA_SIZE_WITH_CH));
+		critical_section_exit(&my_critical_section);
+		if (flt_code)
+			fault_handler(SPI_COMM);
+		count += num_entries_to_read;
+
+		// Read nubmer of data points left in FIFO buffer
+		flt_code = read_register(ADXL38X_FIFO_STATUS0, 2, fifo_status);
+		if (flt_code)
+			fault_handler(SPI_COMM);
+
+		fifo_queue_depth = (fifo_status[0] | ((uint16_t)fifo_status[1] << 8));
+		fifo_queue_depth = fifo_queue_depth & 0x01ff;
+		// DEBUG_PRINT("Fifo entries =  %d\n", fifo_queue_depth);
+
+		if ((fifo_queue_depth) && ((count + MAX_SEQUENTIAL_FIFO_READS) < FIFO_DATA_BUFFER_SIZE))
+		{
+			// set how many datapoints to read based on clockrate
+			if (fifo_queue_depth > MAX_SEQUENTIAL_FIFO_READS)
+				num_entries_to_read = MAX_SEQUENTIAL_FIFO_READS;
+			else
+				num_entries_to_read = fifo_queue_depth;
+
+			// clear the data ready flag, so we can wait for the next datapoint
+			flt_code = clear_data_ready_flag();
+			//  wait for the measurement in progress to finish
+			do
+			{
+				flt_code = read_register(ADXL38X_STATUS3, 1, &status_reg);
+				if (flt_code)
+					fault_handler(SPI_COMM);
+				sleep_us(5);
+			} while (!(status_reg & (0x01)));
+		}
+		// continue until the accelerometer FIFO queue is empty until the processor data buffer is full.
+	} while ((fifo_queue_depth > 0) && ((count + MAX_SEQUENTIAL_FIFO_READS) * ADXL38X_DATA_SIZE_WITH_CH < FIFO_DATA_BUFFER_SIZE));
+	return (count);
+}
+
 int main()
 {
 	int32_t flt_code = 0;
@@ -460,53 +512,28 @@ int main()
 		}
 		if (status_reg & (1 << 3))
 		{
-			// Read FIFO status and data if FIFO_WATERMARK is set
-			do
-			{
-				flt_code = read_register(ADXL38X_FIFO_STATUS0, 2, fifo_status); // Address will show as 0x3D on logic analyzer due to R/W bit.
-				if (flt_code)
-					fault_handler(SPI_COMM);
-				fifo_queue_depth = (fifo_status[0] | ((uint16_t)fifo_status[1] << 8));
-				fifo_queue_depth = fifo_queue_depth & 0x01ff;
-				// DEBUG_PRINT("Fifo entries =  %d\n", fifo_queue_depth);
-				//  check if we read the number of FIFO entries wrong.
-				if (fifo_queue_depth > ADXL38X_FIFO_SIZE)
-					fault_handler(FIFO_UNMATCH);
+			uint32_t num_datapoints_in_buff = 0;
+			// Read data out
+			num_datapoints_in_buff = read_fifo_to_empty();
+			// DEBUG_PRINT("Read %u, Tot: %u\n", num_datapoints_in_buff, total_samples_read);
 
-				// set how many datapoints to read based on clockrate
-				uint32_t num_entries_to_read = 0;
-				if (fifo_queue_depth > MAX_SEQUENTIAL_FIFO_READS)
-				{
-					num_entries_to_read = MAX_SEQUENTIAL_FIFO_READS;
-				}
-				else
-					num_entries_to_read = fifo_queue_depth;
+			//  send to serial buffer
+			//  human readable output
+			// fifo_data_to_readable_string(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
+			//  DEBUG_PRINT("%s", serialBuffers.buf[serialBuffers.active].data);
 
-				// read the data & process to USB-->UART
-				critical_section_enter_blocking(&my_critical_section);
-				flt_code = read_register(ADXL38X_FIFO_DATA, num_entries_to_read * ADXL38X_DATA_SIZE_WITH_CH, fifo_data); // Address will show as 0x3B on logic analyzer due to R/W bit.
-				critical_section_exit(&my_critical_section);
-				if (flt_code)
-					fault_handler(SPI_COMM);
-				else
-				{
-					// fifo_data_to_readable_string(fifo_data, &serialBuffers.buf[serialBuffers.active], set_fifo_queue_depth, total_samples_read);
-					//  DEBUG_PRINT("%s", serialBuffers.buf[serialBuffers.active].data);
-					uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, &serialBuffers.buf[serialBuffers.active], num_entries_to_read, total_samples_read);
-					// DEBUG_PRINT("%u bytes", bytes_to_write);
-					// sleep_us(50);																															// This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
-					fwrite(serialBuffers.buf[serialBuffers.active].data, sizeof(&serialBuffers.buf[serialBuffers.active].data[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
-					fflush(stdout);
+			// binary output
+			uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
+			// DEBUG_PRINT("%u bytes", bytes_to_write);																															// This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
+			fwrite(serialBuffers.buf[serialBuffers.active].data, sizeof(&serialBuffers.buf[serialBuffers.active].data[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
+			fflush(stdout);
 
-					serialBuffers.active++;
-					if (serialBuffers.active >= NUM_UART_BUFFERS)
-						serialBuffers.active = 0;
+			serialBuffers.active++;
+			if (serialBuffers.active >= NUM_UART_BUFFERS)
+				serialBuffers.active = 0;
 
-					//  Update counters
-					total_samples_read += num_entries_to_read;
-					fifo_queue_depth -= num_entries_to_read;
-				}
-			} while (fifo_queue_depth > 0);
+			//  Update counters
+			total_samples_read += num_datapoints_in_buff;
 		}
 	}
 	DEBUG_PRINT("End\n");
