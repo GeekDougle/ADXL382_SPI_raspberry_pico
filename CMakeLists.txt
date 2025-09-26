@@ -52,6 +52,9 @@ pico_enable_stdio_usb(adxl382_spi 1)
 # pull in common dependencies and additional spi hardware support
 target_link_libraries(adxl382_spi pico_stdlib hardware_spi)
 
+#execute all code in RAM for speed.
+pico_set_binary_type(adxl382_spi no_flash)
+
 # create map/bin/hex file etc.
 pico_add_extra_outputs(adxl382_spi)
 

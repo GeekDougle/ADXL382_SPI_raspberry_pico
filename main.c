@@ -43,12 +43,12 @@
 
 */
 
-#define ADXL38X_FIFO_SIZE 318		   // Number of entries in the FIFO buffer. Not # of bytes.
-#define ADXL38X_DATA_SIZE_WITH_CH 3	   // 16 bits of measurement +2 bits of channel ID
-#define ADXL38X_DATA_SIZE_WITHOUT_CH 2 // 16 bits of measurement
-#define NUM_AXES 3					   // X,Y,Z
-#define SPI_CLK_MHZ 1000 * 8000		   // This example will use SPI0 at 4MHz
-#define MAX_SEQUENTIAL_FIFO_READS 12   // Max allowed is ((SPI_CLK_MHZ/(16000))-8)/24 assuming ADXL38X_DATA_SIZE_WITH_CH
+#define ADXL38X_FIFO_SIZE ((uint8_t)(318)) // Number of entries in the FIFO buffer. Not # of bytes.
+#define ADXL38X_DATA_SIZE_WITH_CH 3		   // 16 bits of measurement +2 bits of channel ID
+#define ADXL38X_DATA_SIZE_WITHOUT_CH 2	   // 16 bits of measurement
+#define NUM_AXES 3						   // X,Y,Z
+#define SPI_CLK_MHZ 1000 * 8000			   // This example will use SPI0 at 4MHz
+#define MAX_SEQUENTIAL_FIFO_READS 12	   // Max allowed is ((SPI_CLK_MHZ/(16000))-8)/24 assuming ADXL38X_DATA_SIZE_WITH_CH
 #define FIFO_DATA_BUFFER_SIZE ADXL38X_FIFO_SIZE *ADXL38X_DATA_SIZE_WITH_CH
 #define UART_BUF_SIZE 1024 * 2 // Lots of RAM, FIFO is only 320 max of 3 byte entries.  This gives lots of room for any overhead to make it human readable.
 #define NUM_UART_BUFFERS 2
@@ -407,7 +407,7 @@ uint32_t fifo_data_to_data_stream(uint8_t *adxl_data, Buffer_t *ser_buf, uint32_
 	return (ser_buf->num_elements);
 }
 
-uint32_t read_fifo_to_empty(void)
+uint32_t read_fifo(void)
 {
 	int32_t flt_code;
 	uint32_t num_entries_to_read;
@@ -416,7 +416,7 @@ uint32_t read_fifo_to_empty(void)
 
 	do
 	{
-		// FIFO watermark flag is set, so we know to read at least that many data points
+		//  FIFO watermark flag is set, so we know to read at least that many data points
 		num_entries_to_read = MAX_SEQUENTIAL_FIFO_READS;
 		// read the data from FIFO
 		critical_section_enter_blocking(&my_critical_section);
@@ -456,6 +456,7 @@ uint32_t read_fifo_to_empty(void)
 		}
 		// continue until the accelerometer FIFO queue is empty until the processor data buffer is full.
 	} while ((fifo_queue_depth > 0) && ((count + MAX_SEQUENTIAL_FIFO_READS) * ADXL38X_DATA_SIZE_WITH_CH < FIFO_DATA_BUFFER_SIZE));
+
 	return (count);
 }
 
@@ -507,14 +508,14 @@ int main()
 
 		if (status_reg & (1 << 1))
 		{
-			// DEBUG_PRINT("Fifo OVFLW");
-			fault_handler(FIFO_OVERFLOW);
+			DEBUG_PRINT("Fifo OVFLW");
+			// fault_handler(FIFO_OVERFLOW);
 		}
 		if (status_reg & (1 << 3))
 		{
 			uint32_t num_datapoints_in_buff = 0;
 			// Read data out
-			num_datapoints_in_buff = read_fifo_to_empty();
+			num_datapoints_in_buff = read_fifo();
 			// DEBUG_PRINT("Read %u, Tot: %u\n", num_datapoints_in_buff, total_samples_read);
 
 			//  send to serial buffer
