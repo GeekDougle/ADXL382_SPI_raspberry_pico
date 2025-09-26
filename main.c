@@ -14,6 +14,11 @@
 #include <errno.h>
 #include "hardware/uart.h"
 
+#include "hardware/pll.h"
+#include "hardware/clocks.h"
+#include "hardware/structs/pll.h"
+#include "hardware/structs/clocks.h"
+
 /* Example code to talk to a ADXL382 acceleromater sensor via SPI.
 
    NOTE: Ensure the device is capable of being driven at 3.3v NOT 5v. The Pico
@@ -71,8 +76,7 @@ uint8_t register_value;
 uint8_t status0;
 uint8_t fifo_status[2];
 uint8_t fifo_data[ADXL38X_FIFO_SIZE * ADXL38X_DATA_SIZE_WITH_CH];
-uint16_t set_fifo_entries = 0x3C; //  60 entries in FIFO
-// uint16_t set_fifo_entries = 0x5A; //  90 entries in FIFO
+uint16_t set_fifo_entries = 12;
 uint16_t fifo_entries = 2;
 bool chID_enable = true; // FIFO channel id
 uint8_t fifo_read_bytes;
@@ -156,7 +160,12 @@ int32_t setup_pi_pico()
 	// Set a new baud rate if needed
 	uart_set_baudrate(uart0, 115200);*/
 	stdio_init_all();
-	sleep_ms(1000);
+	sleep_ms(100);
+	// Set the system clock to 200MHz
+	set_sys_clock_khz(200000, true);
+	// Re init uart now that clk_peri has changed
+	stdio_init_all();
+	sleep_ms(100);
 
 #if !defined(spi_default) || !defined(PICO_DEFAULT_SPI_SCK_PIN) || !defined(PICO_DEFAULT_SPI_TX_PIN) || !defined(PICO_DEFAULT_SPI_RX_PIN) || !defined(PICO_DEFAULT_SPI_CSN_PIN)
 #warning spi/adxl382_spi example requires a board with SPI pins
@@ -170,8 +179,8 @@ int32_t setup_pi_pico()
 	{
 
 		DEBUG_PRINT("Hello, adxl382! Reading raw data from registers via SPI...\n");
-		// This example will use SPI0 at 4MHz.
-		spi_init(spi_default, 4000 * 1000);
+		// This example will use SPI0 at 8MHz.
+		spi_init(spi_default, 8000 * 1000);
 		// Set SPI format
 		spi_set_format(spi0, // SPI instance
 					   8,	 // Number of bits per transfer
@@ -195,7 +204,7 @@ int32_t setup_pi_pico()
 		{
 			DEBUG_PRINT("SPI is writable\n");
 		}
-		sleep_ms(1000);
+		sleep_ms(100);
 	}
 	return (fault_code);
 }
@@ -253,7 +262,7 @@ int32_t config_accelerometer()
 	{
 		DEBUG_PRINT("Device is in HP mode\n");
 		// WAIT 500ms after going into HP mode.
-		sleep_ms(500);
+		sleep_ms(50);
 		// Set the number of bytes to read per sample
 		if (chID_enable)
 			fifo_read_bytes = 3;
@@ -306,7 +315,6 @@ uint32_t fifo_data_to_data_stream(uint8_t *adxl_data, uint8_t *ser_buf, uint32_t
 int main()
 {
 	int32_t flt_code = 0;
-	uint32_t count = 0;
 
 	if (setup_pi_pico())
 	{
@@ -330,8 +338,6 @@ int main()
 	else
 		fault_handler(flt_code);
 
-	// reset count
-	count = 0;
 	while (true)
 	{
 		set_led_state(1);
@@ -349,24 +355,23 @@ int main()
 		fifo_entries = fifo_entries & 0x01ff;
 
 		// clear fifo_data buffer
-		memset(fifo_data, 0, sizeof(fifo_data));
+		// memset(fifo_data, 0, sizeof(fifo_data));
 
 		// Read FIFO status and data if FIFO_WATERMARK is set
 		if (status0 & (1 << 3))
 		{
-			count += set_fifo_entries;
 			// DEBUG_PRINT("Fifo entries =  %d\n", fifo_entries);
-			if (fifo_entries < set_fifo_entries)
-				fault_handler(FIFO_UNMATCH);
+			// if (fifo_entries < set_fifo_entries)
+			//	fault_handler(FIFO_UNMATCH);
 			// Read data from FIFO (can read at least upto 12 samples * 3 bytes (chID, data))
 			// DEBUG_PRINT("Reading %d bytes from FIFO\n", set_fifo_entries*fifo_read_bytes);
-			flt_code = read_register(ADXL38X_FIFO_DATA, set_fifo_entries * fifo_read_bytes, fifo_data);
+			flt_code = read_register(ADXL38X_FIFO_DATA, fifo_entries * fifo_read_bytes, fifo_data);
 			if (flt_code)
 				fault_handler(SPI_COMM);
 			else
 			{
 				// fifo_data_to_readable_string(fifo_data, serial_buf, set_fifo_entries, total_samples_read);
-				// DEBUG_PRINT("%s", serial_buf);
+				//  DEBUG_PRINT("%s", serial_buf);
 				uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, serial_buf, set_fifo_entries, total_samples_read);
 				fwrite(serial_buf, sizeof(serial_buf[0]), bytes_to_write - 1, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
 				fflush(stdout);
