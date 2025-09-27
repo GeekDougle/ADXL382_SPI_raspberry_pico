@@ -18,6 +18,7 @@
 #include <errno.h>
 #include "hardware/uart.h"
 #include "pico/critical_section.h"
+#include <tusb.h>
 
 /* Example code to talk to a ADXL382 acceleromater sensor via SPI.
 
@@ -64,6 +65,15 @@ enum Fault_Codes
 	FIFO_OVERFLOW
 };
 
+enum States
+{
+	BOOT_STATE,
+	READY_STATE,
+	READING_STATE,
+	DONE_STATE,
+	FAULT_STATE // Always keep this last in the list to make state checking easy.
+};
+
 #define DEBUG_PRINT(msg, ...)       \
 	do                              \
 	{                               \
@@ -92,6 +102,8 @@ typedef struct
 	Buffer_t buf[NUM_UART_BUFFERS]; // 2 or more buffers
 	uint8_t active;					// index of the buffer (0 or 1)
 } DoubleBuffer_t;
+
+static const char idn[] = "TinyUSB,PiPico-ADXL382,SerialNumber,FirmwareVer123456\r\n";
 
 uint8_t register_value;
 uint8_t status_reg;
@@ -460,11 +472,35 @@ uint32_t read_fifo(void)
 	return (count);
 }
 
+uint8_t state_machine_processor(uint8_t s, uint8_t c)
+{
+	switch (s)
+	{
+	case READY_STATE:
+		if (c == 's' || c == 'S')
+			s = READING_STATE;
+		if (c == 'x' || c == 'X')
+			s = DONE_STATE;
+		break;
+	case READING_STATE:
+		if (c == 'f' || c == 'F')
+			s = READY_STATE;
+		if (c == 'x' || c == 'X')
+			s = DONE_STATE;
+		break;
+	}
+	if (c == 'i' || c == 'I')
+		DEBUG_PRINT(idn);
+	return (s);
+}
+
 int main()
 {
 	int32_t flt_code = 0;
 	uint32_t total_samples_read = 0;
 	uint16_t fifo_queue_depth;
+	uint8_t state = BOOT_STATE;
+	int input_char;
 
 	if (setup_pi_pico())
 	{
@@ -497,44 +533,56 @@ int main()
 
 	// reset count
 	total_samples_read = 0;
+	state = READY_STATE;
 	// DEBUG_PRINT("Starting normal operation check\n");
 	set_led_state(1);
-	while (true)
+	while (state != DONE_STATE)
 	{
-		// Read status to determine if FIFO_WATERMARK bit set. Address will show as 0x23 on logic analyzer due to R/W bit.
-		flt_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
-		if (flt_code)
-			fault_handler(SPI_COMM);
+		if (tud_cdc_available())
+			state = state_machine_processor(state, getchar());
 
-		if (status_reg & (1 << 1))
+		if (state == READING_STATE)
 		{
-			DEBUG_PRINT("Fifo OVFLW");
-			// fault_handler(FIFO_OVERFLOW);
+			// Read status to determine if FIFO_WATERMARK bit set. Address will show as 0x23 on logic analyzer due to R/W bit.
+			flt_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
+			if (flt_code)
+				fault_handler(SPI_COMM);
+
+			if (status_reg & (1 << 1))
+			{
+				DEBUG_PRINT("Fifo OVFLW");
+				// fault_handler(FIFO_OVERFLOW);
+			}
+			if (status_reg & (1 << 3))
+			{
+				uint32_t num_datapoints_in_buff = 0;
+				// Read data out
+				num_datapoints_in_buff = read_fifo();
+				// DEBUG_PRINT("Read %u, Tot: %u\n", num_datapoints_in_buff, total_samples_read);
+
+				//  send to serial buffer
+				//  human readable output
+				// fifo_data_to_readable_string(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
+				//  DEBUG_PRINT("%s", serialBuffers.buf[serialBuffers.active].data);
+
+				// binary output
+				uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
+				// DEBUG_PRINT("%u bytes", bytes_to_write);																															// This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
+				fwrite(serialBuffers.buf[serialBuffers.active].data, sizeof(&serialBuffers.buf[serialBuffers.active].data[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
+				// fflush(stdout);  Don't block.
+
+				serialBuffers.active++;
+				if (serialBuffers.active >= NUM_UART_BUFFERS)
+					serialBuffers.active = 0;
+
+				//  Update counters
+				total_samples_read += num_datapoints_in_buff;
+			}
 		}
-		if (status_reg & (1 << 3))
+		else
 		{
-			uint32_t num_datapoints_in_buff = 0;
-			// Read data out
-			num_datapoints_in_buff = read_fifo();
-			// DEBUG_PRINT("Read %u, Tot: %u\n", num_datapoints_in_buff, total_samples_read);
-
-			//  send to serial buffer
-			//  human readable output
-			// fifo_data_to_readable_string(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
-			//  DEBUG_PRINT("%s", serialBuffers.buf[serialBuffers.active].data);
-
-			// binary output
-			uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
-			// DEBUG_PRINT("%u bytes", bytes_to_write);																															// This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
-			fwrite(serialBuffers.buf[serialBuffers.active].data, sizeof(&serialBuffers.buf[serialBuffers.active].data[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
-			// fflush(stdout);  Don't block.
-
-			serialBuffers.active++;
-			if (serialBuffers.active >= NUM_UART_BUFFERS)
-				serialBuffers.active = 0;
-
-			//  Update counters
-			total_samples_read += num_datapoints_in_buff;
+			sleep_ms(1000);
+			DEBUG_PRINT("Hello?");
 		}
 	}
 	DEBUG_PRINT("End\n");
