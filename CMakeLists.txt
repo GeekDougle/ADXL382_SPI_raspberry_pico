@@ -47,17 +47,31 @@ add_executable(adxl382_spi
         )
 
         #enable uart and usb port
-pico_enable_stdio_uart(adxl382_spi 0)
+pico_enable_stdio_uart(adxl382_spi 1)
 pico_enable_stdio_usb(adxl382_spi 1)
+
+# Make sure all files can be found
+target_include_directories(adxl382_spi PUBLIC
+        ${CMAKE_CURRENT_LIST_DIR})
+
 # pull in common dependencies and additional spi hardware support
-target_link_libraries(adxl382_spi pico_stdlib hardware_spi)
+target_link_libraries(adxl382_spi
+    pico_stdlib        # provides stdio.h, stdlib.h, string.h, errno.h, pico/stdlib.h
+    pico_binary_info   # pico/binary_info.h (optional but commonly used)
+    hardware_pll       # hardware/pll.h
+    hardware_clocks    # hardware/clocks.h
+    hardware_spi       # hardware/spi.h
+    hardware_uart      # hardware/uart.h
+)
 
 #execute all code in RAM for speed.
-pico_set_binary_type(adxl382_spi no_flash)
+#pico_set_binary_type(adxl382_spi no_flash)
 
 #increase USB TX buffer sizes to support faster transfer rates.
 target_compile_definitions(adxl382_spi PUBLIC CFG_TUD_CDC_TX_BUFSIZE=1024)
 target_compile_definitions(adxl382_spi PUBLIC CFG_TUD_CDC_EP_BUFSIZE=1024)
+#don't let data get thrown out 
+target_compile_definitions(adxl382_spi PUBLIC PICO_STDIO_USB_STDOUT_TIMEOUT_US=10000)
 
 # create map/bin/hex file etc.
 pico_add_extra_outputs(adxl382_spi)
