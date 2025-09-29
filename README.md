@@ -1,6 +1,6 @@
 
 This is the C driver code for ADXL382 sensor. The MCU used is raspberry pi pico. Data communication is done via SPI.
-The python file to read sensor data through serial USB and display data on GUI can be found in this repo https://github.com/dauhoangganh/ADXL382_Pico_Streamlit_Example
+The python file to read sensor data through serial USB, but can't send data to the Pico through USB (can't get it working on Windows, need to check other OSes).  using a pico or USB<-->Uart bridge to read the other uart for receive.
 In the main.c, ADXL382 is set up to operate in High performance mode, 8kHz bandwidth and sampling rate (output data rate) at 16KHz.
 
 # Connect Pico to ADXL382
