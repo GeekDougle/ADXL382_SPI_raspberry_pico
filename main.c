@@ -52,33 +52,15 @@
 #define SPI_CLK_MHZ 1000 * 8000			   // This example will use SPI0 at 4MHz
 #define MAX_SEQUENTIAL_FIFO_READS 12	   // Max allowed is ((SPI_CLK_MHZ/(16000))-8)/24 assuming ADXL38X_DATA_SIZE_WITH_CH
 #define FIFO_DATA_BUFFER_SIZE ADXL38X_FIFO_SIZE *ADXL38X_DATA_SIZE_WITH_CH
+#define LED_PIN PICO_DEFAULT_LED_PIN
 
 #define UART_ID uart0
-#define BAUD_RATE 115200
+#define BAUD_RATE (1843200)
 #define UART_TX_PIN 0
 #define UART_RX_PIN 1
 #define UART_BUF_SIZE 1024 * 2 // Lots of RAM, FIFO is only 320 max of 3 byte entries.  This gives lots of room for any overhead to make it human readable.
 #define NUM_UART_BUFFERS 2
 
-enum Fault_Codes
-{
-	NO_ERROR,
-	SPI_COMM,
-	FIFO_UNMATCH,
-	BOOT_ERROR,
-	SPI_PIN_DEF_ERROR,
-	ACCEL_INIT_ERROR,
-	FIFO_OVERFLOW
-};
-
-enum States
-{
-	BOOT_STATE,
-	READY_STATE,
-	READING_STATE,
-	DONE_STATE,
-	FAULT_STATE // Always keep this last in the list to make state checking easy.
-};
 #if !defined(NDEBUG)
 #define DEBUG_PRINT(msg, ...)       \
 	do                              \
@@ -101,6 +83,26 @@ enum States
 		printf(msg, ##__VA_ARGS__); \
 		fflush(stdout);             \
 	} while (0)
+
+enum Fault_Codes
+{
+	NO_ERROR,
+	SPI_COMM,
+	FIFO_UNMATCH,
+	BOOT_ERROR,
+	SPI_PIN_DEF_ERROR,
+	ACCEL_INIT_ERROR,
+	FIFO_OVERFLOW
+};
+
+enum States
+{
+	BOOT_STATE,
+	READY_STATE,
+	READING_STATE,
+	DONE_STATE,
+	FAULT_STATE // Always keep this last in the list to make state checking easy.
+};
 
 // A single buffer
 typedef struct
@@ -130,7 +132,6 @@ uint8_t uart_buff0[UART_BUF_SIZE];
 uint8_t uart_buff1[UART_BUF_SIZE];
 
 // LED vars, enums, and structs
-const uint16_t LED_PIN = PICO_DEFAULT_LED_PIN;
 volatile bool led_state = false;
 
 // For pausing ints during critical sections.
@@ -258,16 +259,15 @@ int32_t setup_pi_pico()
 	gpio_init(LED_PIN);
 	gpio_set_dir(LED_PIN, GPIO_OUT);
 
-	// Initialize UART0 with a baud rate of 9600
-	uart_init(uart0, 9600);
-	gpio_set_function(1, GPIO_FUNC_UART); // RX
-	// Set a new baud rate if needed
-	uart_set_baudrate(uart0, 115200);
-	stdio_init_all();
-	sleep_ms(100);
-
 	// Set the system clock to 200MHz
 	set_sys_clock_khz(200000, true);
+	/*
+		// Initialize UART0 with a baud rate of 9600
+		uart_init(uart0, 9600);
+		gpio_set_function(1, GPIO_FUNC_UART); // RX
+		// Set a new baud rate if needed
+		uart_set_baudrate(uart0, BAUD_RATE);
+		*/
 
 	// Re init uart now that clk_peri has changed
 	stdio_init_all();
