@@ -126,6 +126,7 @@ uint8_t status_reg;
 uint8_t fifo_status[2];
 uint8_t fifo_data[FIFO_DATA_BUFFER_SIZE]; // Can fit max possible size
 uint16_t set_fifo_queue_depth = MAX_SEQUENTIAL_FIFO_READS;
+uint32_t total_samples_read = 0;
 
 DoubleBuffer_t serialBuffers;
 uint8_t uart_buff0[UART_BUF_SIZE];
@@ -497,6 +498,8 @@ uint8_t state_machine_processor(uint8_t s, uint8_t c)
 		if (c == 's' || c == 'S')
 		{
 			s = READING_STATE;
+			// reset count
+			total_samples_read = 0;
 			// Add the repeating timer with a 500ms interval
 			// The callback function will be executed every 500ms
 			add_repeating_timer_ms(500, repeating_timer_callback, NULL, &timer);
@@ -529,7 +532,6 @@ uint8_t state_machine_processor(uint8_t s, uint8_t c)
 int main()
 {
 	int32_t flt_code = 0;
-	uint32_t total_samples_read = 0;
 	uint16_t fifo_queue_depth;
 	uint8_t state = BOOT_STATE;
 	int input_char;
@@ -562,8 +564,6 @@ int main()
 	else
 		fault_handler(flt_code);
 
-	// reset count
-	total_samples_read = 0;
 	state = READY_STATE;
 	// DEBUG_PRINT("Starting normal operation check\n");
 	set_led_state(true);
