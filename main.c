@@ -51,6 +51,11 @@
 #define SPI_CLK_MHZ 1000 * 8000			   // This example will use SPI0 at 4MHz
 #define MAX_SEQUENTIAL_FIFO_READS 12	   // Max allowed is ((SPI_CLK_MHZ/(16000))-8)/24 assuming ADXL38X_DATA_SIZE_WITH_CH
 #define FIFO_DATA_BUFFER_SIZE ADXL38X_FIFO_SIZE *ADXL38X_DATA_SIZE_WITH_CH
+
+#define UART_ID uart0
+#define BAUD_RATE 115200
+#define UART_TX_PIN 0
+#define UART_RX_PIN 1
 #define UART_BUF_SIZE 1024 * 2 // Lots of RAM, FIFO is only 320 max of 3 byte entries.  This gives lots of room for any overhead to make it human readable.
 #define NUM_UART_BUFFERS 2
 
@@ -73,19 +78,27 @@ enum States
 	DONE_STATE,
 	FAULT_STATE // Always keep this last in the list to make state checking easy.
 };
-
+#if !defined(NDEBUG)
 #define DEBUG_PRINT(msg, ...)       \
 	do                              \
 	{                               \
 		printf(msg, ##__VA_ARGS__); \
 		fflush(stdout);             \
 	} while (0)
+#endif
 
-#define STREAM_PRINT(...)    \
-	do                       \
-	{                        \
-		printf(__VA_ARGS__); \
-		fflush(stdout);      \
+#ifdef NDEBUG
+#define DEBUG_PRINT(msg, ...) \
+	do                        \
+	{                         \
+	} while (0)
+#endif
+
+#define STREAM_PRINT(msg, ...)      \
+	do                              \
+	{                               \
+		printf(msg, ##__VA_ARGS__); \
+		fflush(stdout);             \
 	} while (0)
 
 // A single buffer
@@ -235,12 +248,11 @@ int32_t setup_pi_pico()
 	gpio_init(LED_PIN);
 	gpio_set_dir(LED_PIN, GPIO_OUT);
 	// Initialize UART0 with a baud rate of 9600
-	/*uart_init(uart0, 9600);
-	#gpio_set_function(0, GPIO_FUNC_UART); // TX
+	uart_init(uart0, 9600);
 	gpio_set_function(1, GPIO_FUNC_UART); // RX
 
 	// Set a new baud rate if needed
-	uart_set_baudrate(uart0, 115200);*/
+	uart_set_baudrate(uart0, 115200);
 	stdio_init_all();
 	sleep_ms(100);
 	// Set the system clock to 200MHz
@@ -490,7 +502,7 @@ uint8_t state_machine_processor(uint8_t s, uint8_t c)
 		break;
 	}
 	if (c == 'i' || c == 'I')
-		DEBUG_PRINT(idn);
+		STREAM_PRINT(idn);
 	return (s);
 }
 
@@ -538,8 +550,12 @@ int main()
 	set_led_state(1);
 	while (state != DONE_STATE)
 	{
-		if (tud_cdc_available())
-			state = state_machine_processor(state, getchar());
+		int c = stdio_getchar_timeout_us(0);
+		if (c != PICO_ERROR_TIMEOUT)
+		{
+			c = c & 0xFF;
+			state = state_machine_processor(state, c);
+		}
 
 		if (state == READING_STATE)
 		{
@@ -563,7 +579,7 @@ int main()
 				//  send to serial buffer
 				//  human readable output
 				// fifo_data_to_readable_string(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
-				//  DEBUG_PRINT("%s", serialBuffers.buf[serialBuffers.active].data);
+				//  STREAM_PRINT("%s", serialBuffers.buf[serialBuffers.active].data);
 
 				// binary output
 				uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
@@ -578,11 +594,6 @@ int main()
 				//  Update counters
 				total_samples_read += num_datapoints_in_buff;
 			}
-		}
-		else
-		{
-			sleep_ms(1000);
-			DEBUG_PRINT("Hello?");
 		}
 	}
 	DEBUG_PRINT("End\n");
