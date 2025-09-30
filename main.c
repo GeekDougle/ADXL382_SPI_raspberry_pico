@@ -390,7 +390,7 @@ uint32_t empty_fifo_buffer(void)
 	uint8_t junk_buf[NUM_AXES * ADXL38X_DATA_SIZE_WITH_CH];
 	int32_t flt_code;
 
-	// Empty the buffer
+	// Empty the buffer.  Will show as address 0x3B due to read bit being set.
 	flt_code = read_register(ADXL38X_FIFO_DATA, ADXL38X_FIFO_SIZE * ADXL38X_DATA_SIZE_WITH_CH, fifo_data);
 	// Read status to clear full bit. Address will show as 0x23 on logic analyzer due to R/W bit.
 	flt_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
@@ -454,7 +454,7 @@ uint32_t read_fifo(void)
 	{
 		//  FIFO watermark flag is set, so we know to read at least that many data points
 		num_entries_to_read = MAX_SEQUENTIAL_FIFO_READS;
-		// read the data from FIFO
+		// read the data from FIFO. Will show as address 0x3B due to read bit being set.
 		critical_section_enter_blocking(&my_critical_section);
 		flt_code = read_register(ADXL38X_FIFO_DATA, num_entries_to_read * ADXL38X_DATA_SIZE_WITH_CH, fifo_data + (count * ADXL38X_DATA_SIZE_WITH_CH));
 		critical_section_exit(&my_critical_section);
@@ -462,36 +462,29 @@ uint32_t read_fifo(void)
 			fault_handler(SPI_COMM);
 		count += num_entries_to_read;
 
-		// Read nubmer of data points left in FIFO buffer
-		flt_code = read_register(ADXL38X_FIFO_STATUS0, 2, fifo_status);
+		// Check if we are still above the watermark.
+		// Read status to determine if FIFO_WATERMARK bit set. Address will show as 0x23 on logic analyzer due to R/W bit.
+		flt_code = read_register(ADXL38X_STATUS0, 1, &status_reg);
 		if (flt_code)
 			fault_handler(SPI_COMM);
 
-		fifo_queue_depth = (fifo_status[0] | ((uint16_t)fifo_status[1] << 8));
-		fifo_queue_depth = fifo_queue_depth & 0x01ff;
-		// DEBUG_PRINT("Fifo entries =  %d\n", fifo_queue_depth);
-
-		if ((fifo_queue_depth) && ((count + MAX_SEQUENTIAL_FIFO_READS) < FIFO_DATA_BUFFER_SIZE))
+		if ((status_reg & (1 << 3)) && ((count + MAX_SEQUENTIAL_FIFO_READS) < FIFO_DATA_BUFFER_SIZE))
 		{
-			// set how many datapoints to read based on clockrate
-			if (fifo_queue_depth > MAX_SEQUENTIAL_FIFO_READS)
-				num_entries_to_read = MAX_SEQUENTIAL_FIFO_READS;
-			else
-				num_entries_to_read = fifo_queue_depth;
-
-			// clear the data ready flag, so we can wait for the next datapoint
+			// still above watermark, so we can read another set of MAX_SEQUENTIAL_FIFO_READS
+			//  clear the data ready flag, so we can wait for the next datapoint
 			flt_code = clear_data_ready_flag();
 			//  wait for the measurement in progress to finish
 			do
 			{
+				// will show as 0x29 on a logic analyzer b/c of the read bit.
 				flt_code = read_register(ADXL38X_STATUS3, 1, &status_reg);
 				if (flt_code)
 					fault_handler(SPI_COMM);
 				sleep_us(5);
 			} while (!(status_reg & (0x01)));
 		}
-		// continue until the accelerometer FIFO queue is empty until the processor data buffer is full.
-	} while ((fifo_queue_depth > 0) && ((count + MAX_SEQUENTIAL_FIFO_READS) * ADXL38X_DATA_SIZE_WITH_CH < FIFO_DATA_BUFFER_SIZE));
+		// continue until the accelerometer FIFO queue is below the watermark until the processor data buffer is full.
+	} while (status_reg & (1 << 3) && ((count + MAX_SEQUENTIAL_FIFO_READS) * ADXL38X_DATA_SIZE_WITH_CH < FIFO_DATA_BUFFER_SIZE));
 
 	return (count);
 }
@@ -609,8 +602,8 @@ int main()
 
 				// binary output
 				uint32_t bytes_to_write = fifo_data_to_data_stream(fifo_data, &serialBuffers.buf[serialBuffers.active], num_datapoints_in_buff, total_samples_read);
-				// DEBUG_PRINT("%u bytes", bytes_to_write);																															// This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
-				fwrite(serialBuffers.buf[serialBuffers.active].data, sizeof(&serialBuffers.buf[serialBuffers.active].data[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
+				DEBUG_PRINT("%u bytes", bytes_to_write);																							   // This delay is critical to preventing a hardfault in the fwrite.  haven't optimized the duration.
+				fwrite(serialBuffers.buf[serialBuffers.active].data, sizeof(serialBuffers.buf[serialBuffers.active].data[0]), bytes_to_write, stdout); // not sure why bytes_to_write-1 is needed, but otherwise I get an extra byte written
 				// fflush(stdout);  Don't block.
 
 				serialBuffers.active++;
