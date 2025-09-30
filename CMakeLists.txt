@@ -62,6 +62,8 @@ target_link_libraries(adxl382_spi
     hardware_clocks    # hardware/clocks.h
     hardware_spi       # hardware/spi.h
     hardware_uart      # hardware/uart.h
+    hardware_gpio      #hardware/gpio.h
+    pico_time         #pico/time.h
 )
 
 #execute all code in RAM for speed.

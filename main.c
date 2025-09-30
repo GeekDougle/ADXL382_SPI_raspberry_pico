@@ -18,7 +18,8 @@
 #include <errno.h>
 #include "hardware/uart.h"
 #include "pico/critical_section.h"
-#include <tusb.h>
+#include "hardware/gpio.h"
+#include "pico/time.h"
 
 /* Example code to talk to a ADXL382 acceleromater sensor via SPI.
 
@@ -130,10 +131,13 @@ uint8_t uart_buff1[UART_BUF_SIZE];
 
 // LED vars, enums, and structs
 const uint16_t LED_PIN = PICO_DEFAULT_LED_PIN;
-volatile uint8_t led_state = 0;
+volatile bool led_state = false;
 
 // For pausing ints during critical sections.
 critical_section_t my_critical_section;
+
+// Create a repeating timer
+struct repeating_timer timer;
 
 /***************************************************************************/
 /**
@@ -158,28 +162,34 @@ void buffer_init(Buffer_t *b, uint8_t *storage, size_t size)
 	b->num_elements = 0;
 }
 
-void set_led_state(uint8_t state)
+void set_led_state(bool state)
 {
 	if (state)
 	{
-		led_state = 1;
-		gpio_put(LED_PIN, 1);
+		led_state = true;
 	}
 	else
 	{
-		gpio_put(LED_PIN, 0);
-		led_state = 0;
+		led_state = false;
 	}
+	gpio_put(LED_PIN, led_state);
 }
 
 void toggle_led()
 {
-	set_led_state(!(led_state & 0x01));
+	set_led_state(!led_state);
+}
+
+// Callback function for the repeating timer
+bool repeating_timer_callback(struct repeating_timer *rt)
+{
+	toggle_led();
+	return true; // Keep the timer running
 }
 
 int32_t fault_handler(int32_t error_code)
 {
-	set_led_state(0);
+	set_led_state(false);
 	switch (error_code)
 	{
 	case SPI_COMM:
@@ -247,16 +257,18 @@ int32_t setup_pi_pico()
 	critical_section_init(&my_critical_section);
 	gpio_init(LED_PIN);
 	gpio_set_dir(LED_PIN, GPIO_OUT);
+
 	// Initialize UART0 with a baud rate of 9600
 	uart_init(uart0, 9600);
 	gpio_set_function(1, GPIO_FUNC_UART); // RX
-
 	// Set a new baud rate if needed
 	uart_set_baudrate(uart0, 115200);
 	stdio_init_all();
 	sleep_ms(100);
+
 	// Set the system clock to 200MHz
 	set_sys_clock_khz(200000, true);
+
 	// Re init uart now that clk_peri has changed
 	stdio_init_all();
 	sleep_ms(100);
@@ -490,15 +502,30 @@ uint8_t state_machine_processor(uint8_t s, uint8_t c)
 	{
 	case READY_STATE:
 		if (c == 's' || c == 'S')
+		{
 			s = READING_STATE;
+			// Add the repeating timer with a 500ms interval
+			// The callback function will be executed every 500ms
+			add_repeating_timer_ms(500, repeating_timer_callback, NULL, &timer);
+		}
 		if (c == 'x' || c == 'X')
+		{
 			s = DONE_STATE;
+			cancel_repeating_timer(&timer);
+		}
 		break;
 	case READING_STATE:
 		if (c == 'f' || c == 'F')
+		{
 			s = READY_STATE;
+			set_led_state(true);
+			cancel_repeating_timer(&timer);
+		}
 		if (c == 'x' || c == 'X')
+		{
 			s = DONE_STATE;
+			cancel_repeating_timer(&timer);
+		}
 		break;
 	}
 	if (c == 'i' || c == 'I')
@@ -518,7 +545,7 @@ int main()
 	{
 		fault_handler(BOOT_ERROR);
 	};
-	set_led_state(1);
+	set_led_state(true);
 
 	// init double buffer for USB/UART interface
 	buffer_init(&serialBuffers.buf[0], uart_buff0, UART_BUF_SIZE);
@@ -532,7 +559,6 @@ int main()
 		sleep_ms(100);
 		toggle_led();
 	}
-	set_led_state(1); // Ensure the LED is on after an arbitrary number of toggles while waiting for USB.
 	DEBUG_PRINT("USB port is successfully initialised\n");
 
 	flt_code = config_accelerometer();
@@ -547,7 +573,7 @@ int main()
 	total_samples_read = 0;
 	state = READY_STATE;
 	// DEBUG_PRINT("Starting normal operation check\n");
-	set_led_state(1);
+	set_led_state(true);
 	while (state != DONE_STATE)
 	{
 		int c = stdio_getchar_timeout_us(0);
@@ -597,5 +623,5 @@ int main()
 		}
 	}
 	DEBUG_PRINT("End\n");
-	set_led_state(0);
+	set_led_state(false);
 }
