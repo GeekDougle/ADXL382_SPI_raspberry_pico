@@ -33,11 +33,7 @@ project(adxl382_spi C CXX ASM)
 # Initialise the Raspberry Pi Pico SDK
 pico_sdk_init()
 
-# It looks like either of the following methods work (add_compile_option or set(...), but they must be immediately after pico_sdk_init())
- # Append the -fstack-usage flag to C compiler flags
-# set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fstack-usage")
-# If you have C++ code, also add it to CXX flags:
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fstack-usage")
+# Output stack usage detail files in build dir.
 add_compile_options("-fstack-usage")
 
 # Add executable. Default name is the project name, version 0.1
@@ -46,15 +42,7 @@ add_executable(adxl382_spi
         main.c     
         )
 
-        #enable uart and usb port
-pico_enable_stdio_uart(adxl382_spi 1)
-pico_enable_stdio_usb(adxl382_spi 1)
-
-# Make sure all files can be found
-target_include_directories(adxl382_spi PUBLIC
-        ${CMAKE_CURRENT_LIST_DIR})
-
-# pull in common dependencies and additional spi hardware support
+        # pull in common dependencies and additional spi hardware support
 target_link_libraries(adxl382_spi
     pico_stdlib        # provides stdio.h, stdlib.h, string.h, errno.h, pico/stdlib.h
     pico_binary_info   # pico/binary_info.h (optional but commonly used)
@@ -66,10 +54,19 @@ target_link_libraries(adxl382_spi
     pico_time         #pico/time.h
 )
 
+# Make sure all files can be found
+target_include_directories(adxl382_spi PUBLIC
+        ${CMAKE_CURRENT_LIST_DIR})
+
 #execute all code in RAM for speed.
 #pico_set_binary_type(adxl382_spi no_flash)
 
+#enable uart and usb port
+pico_enable_stdio_uart(adxl382_spi 0)
+pico_enable_stdio_usb(adxl382_spi 1)
+
 #increase USB TX buffer sizes to support faster transfer rates.
+target_compile_definitions(adxl382_spi PUBLIC CFG_TUD_CDC_RX_BUFSIZE=1024)
 target_compile_definitions(adxl382_spi PUBLIC CFG_TUD_CDC_TX_BUFSIZE=1024)
 target_compile_definitions(adxl382_spi PUBLIC CFG_TUD_CDC_EP_BUFSIZE=1024)
 #don't let data get thrown out 
